@@ -324,6 +324,112 @@ describe('transferService.transfer', () => {
     });
   });
 
+  describe('uuid casing', () => {
+    // PostgreSQL's uuid type compares case-insensitively and always renders back
+    // as lowercase, so an uppercase id from a caller is a legitimate reference to
+    // an existing row. zod's .uuid() accepts uppercase too, so the API layer in
+    // Task 7 will not filter this out.
+    it('resolves accounts given mixed-case uuids', async () => {
+      const result = await transferService.transfer({
+        idempotencyKey: 'k-upper',
+        fromAccountId: from.id.toUpperCase(),
+        toAccountId: to.id.toUpperCase(),
+        amount: 500,
+        currency: 'USD',
+      });
+
+      expect(result.replayed).toBe(false);
+      // Entries are attributed to the canonical lowercase ids.
+      const debit = result.entries.find((e) => e.direction === 'debit')!;
+      const credit = result.entries.find((e) => e.direction === 'credit')!;
+      expect(debit.accountId).toBe(from.id);
+      expect(credit.accountId).toBe(to.id);
+
+      // Balances are keyed by the normalised ids, not the raw uppercase input.
+      expect(result.fromBalance).toBe(-500);
+      expect(result.toBalance).toBe(500);
+      expect(await balanceOf(from.id)).toBe(-500);
+      expect(await balanceOf(to.id)).toBe(500);
+    });
+
+    it('treats a mixed-case self-transfer as a self-transfer', async () => {
+      await expect(
+        transferService.transfer({
+          idempotencyKey: 'k-self-case',
+          fromAccountId: from.id.toUpperCase(),
+          toAccountId: from.id.toLowerCase(),
+          amount: 100,
+          currency: 'USD',
+        })
+      ).rejects.toThrow(ValidationError);
+      expect(await db('entries')).toHaveLength(0);
+    });
+
+    it('locks in the same order no matter how the caller cases the ids', async () => {
+      // ASCII sorts uppercase before lowercase, so without normalisation two
+      // callers spelling the same pair differently would sort into opposite lock
+      // orders and could deadlock.
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const locked: string[] = [];
+      const listener = (q: { sql: string; bindings: readonly unknown[] }) => {
+        if (/from\s+"?accounts"?/i.test(q.sql) && /for\s+update/i.test(q.sql)) {
+          locked.push(...q.bindings.map(String).filter((b) => UUID_RE.test(b)));
+        }
+      };
+      db.on('query', listener);
+      try {
+        await transferService.transfer({
+          idempotencyKey: 'case-lower',
+          fromAccountId: from.id,
+          toAccountId: to.id,
+          amount: 10,
+          currency: 'USD',
+        });
+        const lowerOrder = [...locked];
+        locked.length = 0;
+
+        await transferService.transfer({
+          idempotencyKey: 'case-upper',
+          fromAccountId: to.id.toUpperCase(),
+          toAccountId: from.id.toUpperCase(),
+          amount: 10,
+          currency: 'USD',
+        });
+        const upperOrder = [...locked];
+
+        expect(lowerOrder).toHaveLength(2);
+        expect(upperOrder).toEqual(lowerOrder);
+        expect(lowerOrder).toEqual([...lowerOrder].sort());
+      } finally {
+        db.off('query', listener);
+      }
+    });
+
+    it('replays a lowercase-keyed transfer when the replay uses uppercase ids', async () => {
+      const first = await transferService.transfer({
+        idempotencyKey: 'k-case-replay',
+        fromAccountId: from.id,
+        toAccountId: to.id,
+        amount: 300,
+        currency: 'USD',
+      });
+
+      const replay = await transferService.transfer({
+        idempotencyKey: 'k-case-replay',
+        fromAccountId: from.id.toUpperCase(),
+        toAccountId: to.id.toUpperCase(),
+        amount: 300,
+        currency: 'USD',
+      });
+
+      expect(replay.replayed).toBe(true);
+      expect(replay.transaction.id).toBe(first.transaction.id);
+      expect(replay.fromBalance).toBe(-300);
+      expect(replay.toBalance).toBe(300);
+      expect(await db('entries')).toHaveLength(2);
+    });
+  });
+
   describe('validation', () => {
     const base = () => ({
       idempotencyKey: 'k-val',

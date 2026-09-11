@@ -63,27 +63,64 @@ function toEntry(row: EntryRow): Entry {
   };
 }
 
-function validate(input: TransferInput): void {
+/**
+ * Validates the request and returns it with account ids canonicalised.
+ *
+ * Account ids are lowercased here, once, and the normalised copy is what the
+ * rest of this module uses. PostgreSQL's `uuid` type compares case-insensitively
+ * and always renders back as lowercase, so a caller may legitimately pass
+ * `A1B2...` and have it match a row stored as `a1b2...`. Carrying the caller's
+ * raw casing any further breaks three things at once:
+ *
+ *  - the self-transfer guard below, which would let `A1B2...` -> `a1b2...`
+ *    through as if the two were different accounts;
+ *  - the lock map in `lockAccounts`, which is keyed by the id PostgreSQL
+ *    returned (lowercase) and would miss on a raw uppercase lookup, producing a
+ *    spurious NotFoundError for a row that was in fact found and locked;
+ *  - and most seriously the lock *ordering*, because ASCII sorts every uppercase
+ *    letter before every lowercase one. Two concurrent transfers over the same
+ *    pair, one spelling an id uppercase and the other lowercase, would sort into
+ *    opposite orders and deadlock — the exact failure this service's lock
+ *    ordering exists to prevent.
+ *
+ * Normalising before any of those three consumers run is what keeps them
+ * consistent, which is why it happens here rather than at each use site.
+ */
+function normalizeAndValidate(input: TransferInput): TransferInput {
   if (typeof input.idempotencyKey !== 'string' || input.idempotencyKey.trim() === '') {
     throw new ValidationError('idempotencyKey is required');
   }
   if (typeof input.currency !== 'string' || input.currency.trim() === '') {
     throw new ValidationError('currency is required');
   }
-  if (!input.fromAccountId || !input.toAccountId) {
+  if (
+    typeof input.fromAccountId !== 'string' ||
+    typeof input.toAccountId !== 'string' ||
+    !input.fromAccountId ||
+    !input.toAccountId
+  ) {
     throw new ValidationError('fromAccountId and toAccountId are required');
   }
-  if (input.fromAccountId === input.toAccountId) {
+
+  const normalized: TransferInput = {
+    ...input,
+    fromAccountId: input.fromAccountId.toLowerCase(),
+    toAccountId: input.toAccountId.toLowerCase(),
+  };
+
+  if (normalized.fromAccountId === normalized.toAccountId) {
     throw new ValidationError('fromAccountId and toAccountId must differ');
   }
   // Rejects floats, NaN, Infinity and anything beyond 2^53-1 (which could not be
   // round-tripped through the bigint column as a JS number).
-  if (!Number.isSafeInteger(input.amount)) {
+  if (!Number.isSafeInteger(normalized.amount)) {
     throw new ValidationError('amount must be an integer number of minor units');
   }
-  if (input.amount <= 0) {
+  if (normalized.amount <= 0) {
     throw new ValidationError('amount must be positive');
   }
+
+  return normalized;
 }
 
 /**
@@ -105,13 +142,18 @@ async function lockAccounts(
   trx: Knex.Transaction,
   input: TransferInput
 ): Promise<Map<string, { id: string; currency: string }>> {
+  // Ids arrive already lowercased by normalizeAndValidate, so this sorts
+  // canonical spellings and every caller derives the same order for a pair.
   const orderedIds = [input.fromAccountId, input.toAccountId].sort();
   const locked = new Map<string, { id: string; currency: string }>();
 
   for (const id of orderedIds) {
     const row = await trx('accounts').select('id', 'currency').where({ id }).forUpdate().first();
     if (row) {
-      locked.set(row.id, row);
+      // Keyed by the id we looked up, not by row.id. Both are canonical
+      // lowercase here, but keying off the lookup value keeps this map
+      // addressable by exactly the ids the caller side uses.
+      locked.set(id, row);
     }
   }
 
@@ -165,10 +207,14 @@ async function entriesFor(trx: Knex.Transaction, transactionId: string): Promise
   return rows.map(toEntry);
 }
 
-export async function transfer(input: TransferInput): Promise<TransferResult> {
+export async function transfer(rawInput: TransferInput): Promise<TransferResult> {
   // Boundary validation happens before any connection is taken: a malformed
   // request must never open a database transaction.
-  validate(input);
+  //
+  // The result shadows the parameter deliberately: everything below this line
+  // sees only the normalised ids, so no use site can accidentally reach for the
+  // caller's raw casing.
+  const input = normalizeAndValidate(rawInput);
 
   return db.transaction(async (trx) => {
     const locked = await lockAccounts(trx, input);
