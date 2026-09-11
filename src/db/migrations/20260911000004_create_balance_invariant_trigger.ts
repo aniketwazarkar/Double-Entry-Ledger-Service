@@ -23,11 +23,38 @@ import type { Knex } from 'knex';
  *
  * The trigger covers UPDATE and DELETE as well as INSERT, so the invariant cannot
  * be broken after the fact by editing or removing a single leg.
+ *
+ * CAUTION for application code: never issue `SET CONSTRAINTS ALL IMMEDIATE` in a
+ * session that performs multi-leg inserts. That undeferrs this trigger, forcing it
+ * to fire per row during the statement, at which point a perfectly legitimate
+ * balanced transfer is rejected on its first leg because the counterpart row does
+ * not exist yet. This fails closed (it cannot admit bad data, only refuse good
+ * data), but it is baffling to debug if you do not know to look for it.
  */
 export async function up(knex: Knex): Promise<void> {
+  // Two guards against temp-table shadowing, both deliberate:
+  //
+  // 1. `SET search_path = pg_catalog, public, pg_temp`. Without a search_path guard,
+  //    a session that runs `CREATE TEMP TABLE entries (...)` makes the query below
+  //    sum its own empty temp table instead of the real one, and an unbalanced
+  //    transaction commits silently. Creating temp tables needs only the TEMP
+  //    privilege, granted to PUBLIC by default, so this is reachable by any writer
+  //    and can even happen by accident.
+  //
+  //    Note `pg_temp` is listed EXPLICITLY, and listed LAST. This is the part that
+  //    is easy to get wrong: PostgreSQL searches the temp schema first for relation
+  //    names even when it does not appear in search_path at all. Simply writing
+  //    `SET search_path = pg_catalog, public` does NOT close the hole — verified by
+  //    test. Naming pg_temp explicitly is the only way to pin where it is searched.
+  //
+  // 2. The query schema-qualifies `public.entries` anyway, so resolution does not
+  //    depend on search_path being right. Belt and braces on the single query the
+  //    entire ledger invariant rests on.
   await knex.raw(`
     CREATE OR REPLACE FUNCTION assert_transaction_balanced() RETURNS trigger
-    LANGUAGE plpgsql AS $$
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp
+    AS $$
     DECLARE
       affected_transaction_ids uuid[] := ARRAY[]::uuid[];
       target_id uuid;
@@ -49,7 +76,7 @@ export async function up(knex: Knex): Promise<void> {
                  0
                )
           INTO net
-          FROM entries
+          FROM public.entries
          WHERE transaction_id = target_id;
 
         IF net <> 0 THEN

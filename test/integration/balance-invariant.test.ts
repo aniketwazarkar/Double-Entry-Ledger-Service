@@ -65,6 +65,53 @@ describe('balance invariant trigger', () => {
     expect(txs).toHaveLength(0);
   });
 
+  it('cannot be bypassed by shadowing "entries" with a temp table', async () => {
+    // PostgreSQL resolves unqualified relation names against pg_temp first. A
+    // session that creates its own TEMP TABLE named "entries" would, if the
+    // trigger function had no search_path guard, make the function sum that
+    // empty temp table instead of public.entries — letting an unbalanced
+    // transaction commit silently. Creating a temp table only needs the TEMP
+    // privilege, which is granted to PUBLIC by default, so this is reachable by
+    // any writer and can even happen by accident (e.g. an ETL job staging into
+    // a temp table that happens to be called "entries").
+    let transactionId: string | undefined;
+
+    await expect(
+      db.transaction(async (trx) => {
+        // Shadow public.entries with a same-shaped empty temp table.
+        await trx.raw(`
+          CREATE TEMP TABLE entries (
+            id uuid,
+            transaction_id uuid,
+            account_id uuid,
+            direction text,
+            amount bigint,
+            currency text,
+            created_at timestamptz
+          ) ON COMMIT DROP
+        `);
+
+        const [tx] = await trx('transactions')
+          .insert({ idempotency_key: 'temp-shadow' })
+          .returning('id');
+        transactionId = tx.id as string;
+
+        // Write to the real table explicitly — the temp table now shadows the
+        // bare name, so these must be schema-qualified to land in public.
+        await trx.raw(
+          `INSERT INTO public.entries
+             (transaction_id, account_id, direction, amount, currency)
+           VALUES (?, ?, 'debit', 100, 'USD'),
+                  (?, ?, 'credit', 50, 'USD')`,
+          [transactionId, accountA, transactionId, accountB]
+        );
+      })
+    ).rejects.toThrow(/unbalanced/i);
+
+    const leaked = await db('entries').where({ transaction_id: transactionId });
+    expect(leaked).toHaveLength(0);
+  });
+
   it('rejects a lone single entry with no counterpart', async () => {
     await expect(
       db.transaction(async (trx) => {
