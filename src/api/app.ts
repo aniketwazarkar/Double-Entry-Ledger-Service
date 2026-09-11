@@ -1,0 +1,19 @@
+import express, { Express } from 'express';
+import { accountsRouter } from './routes/accounts';
+import { transfersRouter } from './routes/transfers';
+import { transactionsRouter } from './routes/transactions';
+import { internalRouter } from './routes/internal';
+import { errorHandler } from './errorHandler';
+
+export const app: Express = express();
+
+app.use(express.json());
+
+app.use('/accounts', accountsRouter);
+app.use('/transfers', transfersRouter);
+app.use('/transactions', transactionsRouter);
+app.use('/internal', internalRouter);
+
+// Must be mounted last: Express identifies an error-handling middleware by its
+// four-argument signature and only reaches it after all other routes/middleware.
+app.use(errorHandler);
