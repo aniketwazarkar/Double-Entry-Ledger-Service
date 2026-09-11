@@ -59,6 +59,27 @@ function encodeCursor(position: CursorPosition): string {
   );
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Both halves are shape-checked here, before they can reach the `?::timestamptz`
+ * and `?::uuid` casts in the query.
+ *
+ * A cursor is caller-supplied input, and "decodes to an array of two non-empty
+ * strings" is not enough to make it safe to hand to PostgreSQL: a cursor built
+ * from well-formed nonsense (`["banana", "not-a-uuid"]`) would satisfy that and
+ * then fail *inside* the SQL, raising a raw pg error (22007 invalid datetime
+ * format / 22P02 invalid text representation) that belongs to no domain error
+ * class and so surfaces as an opaque 500 for what is simply malformed input.
+ * Rejecting it here makes the same case a `ValidationError`, like every other
+ * bad argument to this function.
+ *
+ * `Date.parse` is used strictly as a yes/no format check and its numeric result
+ * is deliberately discarded: parsing truncates to milliseconds, and the whole
+ * point of the cursor is that the microsecond-precision *text* is what reaches
+ * the comparison (see the CursorPosition note above). The raw string is what is
+ * returned.
+ */
 function decodeCursor(cursor: string): CursorPosition {
   let parsed: unknown;
   try {
@@ -78,7 +99,16 @@ function decodeCursor(cursor: string): CursorPosition {
     throw new ValidationError('cursor is not a valid statement cursor');
   }
 
-  return { createdAt: parsed[0], id: parsed[1] };
+  const [createdAt, id] = parsed as [string, string];
+
+  if (Number.isNaN(Date.parse(createdAt))) {
+    throw new ValidationError('cursor is not a valid statement cursor');
+  }
+  if (!UUID_PATTERN.test(id)) {
+    throw new ValidationError('cursor is not a valid statement cursor');
+  }
+
+  return { createdAt, id };
 }
 
 function normalizeLimit(limit: number | undefined): number {
@@ -111,8 +141,22 @@ interface StatementQueryRow {
  * balance as of (and including) that row.
  *
  * Keyset (not offset) pagination on `(created_at, id)`: a cursor names a row,
- * not a position in a count, so entries appended while a client is paging can
- * neither shift a page's contents nor cause a row to be skipped or repeated.
+ * not a position in a count, so entries appended while a client is paging cannot
+ * shift a page's contents the way an OFFSET would.
+ *
+ * That guarantee rests on one assumption worth stating: that `created_at` is
+ * assigned close to commit time, so the key order and the visibility order
+ * broadly agree. It is not strictly true. `entries.created_at` defaults to
+ * `now()`, which in PostgreSQL is *transaction start* time, so a transaction
+ * that begins early and commits late writes a row whose `created_at` is older
+ * than rows already committed and already paged past. A client holding a cursor
+ * beyond that timestamp would never see it — the row is skipped permanently, not
+ * merely reordered. In practice a transfer's window between `now()` and COMMIT is
+ * sub-millisecond, so this needs a pathologically slow concurrent writer, but the
+ * hazard is real and inherent to keying on `created_at` rather than on something
+ * monotonic in commit order. Closing it properly is a schema change (a sequence
+ * column ordered by commit, or `clock_timestamp()` plus a read-snapshot upper
+ * bound), not something this function can do on its own.
  *
  * Everything is computed in one statement, and therefore against one snapshot.
  * That matters for the running balance, which is the sum of two pieces: the

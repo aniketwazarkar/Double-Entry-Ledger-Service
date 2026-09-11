@@ -329,6 +329,40 @@ describe('statementService.getStatement', () => {
     expect(third.nextCursor).toBeNull();
   });
 
+  it('rejects a structurally valid cursor carrying nonsense values', async () => {
+    // Decodes cleanly to an array of two non-empty strings, so it gets past the
+    // JSON/shape check that 'not-a-cursor' fails at. Without explicit format
+    // validation these reach the ?::timestamptz / ?::uuid casts in the query and
+    // PostgreSQL raises a raw 22007 / 22P02 that maps to no domain error — an
+    // opaque 500 for what is merely malformed input.
+    const nonsense = (createdAt: string, id: string): string =>
+      Buffer.from(JSON.stringify([createdAt, id]), 'utf8').toString('base64url');
+
+    // Both halves nonsense.
+    await expect(
+      statementService.getStatement(a.id, { cursor: nonsense('banana', 'not-a-uuid') }),
+    ).rejects.toThrow(ValidationError);
+
+    // Valid timestamp, bad uuid.
+    await expect(
+      statementService.getStatement(a.id, {
+        cursor: nonsense('2026-01-01 00:00:00.000400+00', 'not-a-uuid'),
+      }),
+    ).rejects.toThrow(ValidationError);
+
+    // Valid uuid, bad timestamp.
+    await expect(
+      statementService.getStatement(a.id, { cursor: nonsense('banana', MISSING_ID) }),
+    ).rejects.toThrow(ValidationError);
+
+    // A well-formed cursor whose values simply match nothing is NOT an error —
+    // it is a legitimate position past the end of an empty account.
+    const valid = nonsense('2026-01-01 00:00:00.000400+00', MISSING_ID);
+    const page = await statementService.getStatement(a.id, { cursor: valid });
+    expect(page.rows).toEqual([]);
+    expect(page.nextCursor).toBeNull();
+  });
+
   it('rejects a malformed cursor', async () => {
     await expect(statementService.getStatement(a.id, { cursor: 'not-a-cursor' })).rejects.toThrow(
       ValidationError,
