@@ -1,13 +1,10 @@
 import * as accountService from '../../src/services/accountService';
 import { NotFoundError } from '../../src/domain/errors';
-import db from '../../src/db/knex';
-import { closeDb } from './helpers/db';
+import { closeDb, truncateAll } from './helpers/db';
 
 describe('accountService', () => {
   afterEach(async () => {
-    // truncateAll() also targets transactions/entries, which don't exist
-    // until Task 3 — truncate accounts directly here instead.
-    await db.raw('TRUNCATE TABLE accounts RESTART IDENTITY CASCADE');
+    await truncateAll();
   });
 
   afterAll(async () => {
