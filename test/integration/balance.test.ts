@@ -1,3 +1,4 @@
+import db from '../../src/db/knex';
 import * as accountService from '../../src/services/accountService';
 import * as transferService from '../../src/services/transferService';
 import { NotFoundError } from '../../src/domain/errors';
@@ -8,6 +9,26 @@ const MISSING_ID = '00000000-0000-0000-0000-000000000000';
 
 async function makeAccount(name: string, currency = 'USD'): Promise<Account> {
   return accountService.createAccount({ name, currency, type: 'asset' });
+}
+
+/**
+ * Polls the DB's own clock (not the test host's — see the clock-skew note
+ * further down) until it has moved into a later millisecond than `after`.
+ * Used to guarantee two DB writes land in genuinely different milliseconds,
+ * since Postgres/Docker can otherwise complete both within the same one.
+ */
+async function waitForClockToAdvancePast(after: Date, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const { rows } = await db.raw('SELECT now() AS now');
+    if ((rows[0].now as Date).getTime() > after.getTime()) {
+      return;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`DB clock did not advance past ${after.toISOString()} within ${timeoutMs}ms`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
 }
 
 describe('accountService.getBalance', () => {
@@ -66,13 +87,37 @@ describe('accountService.getBalance', () => {
     // small but non-negligible amount when Postgres runs in Docker.
     const cutoff = before.entries[0].createdAt;
 
-    await transferService.transfer({
+    // getBalance's asOf boundary is inclusive over the *entire millisecond*
+    // of `cutoff` (a JS Date can't express Postgres's microsecond
+    // precision, so the comparison is widened to cover it — see
+    // accountService.getBalance). That means this test only proves
+    // exclusion if the second transfer lands in a *later* millisecond than
+    // `cutoff`; on a fast local Postgres/Docker setup two inserts can easily
+    // land in the same millisecond, which would make the boundary
+    // incorrectly include the second transfer too. Poll until the DB's
+    // clock has actually advanced past `cutoff`'s millisecond before firing
+    // the second transfer, so the test exercises real exclusion rather than
+    // hoping for a gap.
+    await waitForClockToAdvancePast(cutoff);
+
+    const after = await transferService.transfer({
       idempotencyKey: 'k-after',
       fromAccountId: from.id,
       toAccountId: to.id,
       amount: 300,
       currency: 'USD',
     });
+
+    // Fail fast with a clear message rather than silently flaking if the two
+    // transfers still landed in the same millisecond despite the wait above.
+    const afterCreatedAt = after.entries[0].createdAt;
+    if (afterCreatedAt.getTime() <= cutoff.getTime()) {
+      throw new Error(
+        `test precondition violated: second transfer's created_at (${afterCreatedAt.toISOString()}) ` +
+          `did not land after the cutoff (${cutoff.toISOString()}); the exclusion assertion below ` +
+          `would be meaningless`
+      );
+    }
 
     // asOf before the second transfer excludes it.
     await expect(accountService.getBalance(to.id, cutoff)).resolves.toBe(500);
