@@ -47,3 +47,39 @@ export async function getAccount(id: string): Promise<Account> {
 
   return toAccount(row);
 }
+
+/**
+ * balance = SUM(credit amounts) - SUM(debit amounts), optionally restricted to
+ * entries created at or before `asOf` (inclusive).
+ */
+export async function getBalance(id: string, asOf?: Date): Promise<number> {
+  const account = await db<AccountRow>('accounts').where({ id }).first();
+
+  if (!account) {
+    throw new NotFoundError('Account', id);
+  }
+
+  const query = db('entries').where({ account_id: id });
+  if (asOf) {
+    // `created_at` is a Postgres timestamptz with microsecond precision, but a
+    // JS Date only carries milliseconds, so `asOf` is always a truncated-down
+    // representation of any real timestamp that shares its millisecond. Using
+    // a plain `<=` would then exclude a row created in the same millisecond as
+    // `asOf` whenever its microsecond remainder is non-zero (e.g. an entry's
+    // own `createdAt`, echoed straight back as `asOf`, would fail to match
+    // itself). Comparing against the start of the *next* millisecond makes the
+    // whole millisecond of `asOf` inclusive, which is the intended boundary.
+    query.where('created_at', '<', new Date(asOf.getTime() + 1));
+  }
+
+  const row = await query
+    .select(
+      db.raw(
+        `COALESCE(SUM(CASE WHEN direction = 'credit' THEN amount ELSE -amount END), 0) AS balance`
+      )
+    )
+    .first<{ balance: string }>();
+
+  // bigint sum arrives as a string from pg; convert explicitly.
+  return Number(row?.balance ?? 0);
+}
