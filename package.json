@@ -2,11 +2,11 @@
   "name": "double-entry-ledger",
   "version": "1.0.0",
   "description": "Double-entry ledger HTTP service",
-  "main": "dist/index.js",
+  "main": "dist/src/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
-    "start": "node dist/index.js",
+    "start": "node dist/src/index.js",
     "migrate": "knex migrate:latest --knexfile knexfile.ts",
     "migrate:rollback": "knex migrate:rollback --knexfile knexfile.ts",
     "reconcile": "ts-node scripts/reconcile.ts",
