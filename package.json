@@ -9,7 +9,7 @@
     "start": "node dist/index.js",
     "migrate": "knex migrate:latest --knexfile knexfile.ts",
     "migrate:rollback": "knex migrate:rollback --knexfile knexfile.ts",
-    "reconcile": "ts-node src/scripts/reconcile.ts",
+    "reconcile": "ts-node scripts/reconcile.ts",
     "test": "jest",
     "test:unit": "jest --testPathPattern=test/unit",
     "test:integration": "jest --testPathPattern=test/integration"

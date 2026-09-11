@@ -15,6 +15,6 @@
     "declaration": false,
     "sourceMap": true
   },
-  "include": ["src", "test", "knexfile.ts"],
+  "include": ["src", "test", "scripts", "knexfile.ts"],
   "exclude": ["node_modules", "dist"]
 }
