@@ -2,6 +2,12 @@
 
 A ledger service where `sum(debits) == sum(credits)` is enforced by the database — not application trust — and proven under concurrency, not merely asserted. See [`docs/PRD.md`](docs/PRD.md) for the full design rationale and [`docs/superpowers/plans/2026-09-11-double-entry-ledger.md`](docs/superpowers/plans/2026-09-11-double-entry-ledger.md) for the implementation plan.
 
+## Architecture
+
+![Architecture diagram](docs/architecture.png)
+
+This is the architecture flow of this application: requests pass through the Express API and service layer to Postgres via Knex, where a deferred constraint trigger checks `Σdebit - Σcredit = 0` per transaction at `COMMIT` — the invariant is enforced by the database, not application code.
+
 ## Run locally
 
 ```bash
