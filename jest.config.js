@@ -1,6 +1,5 @@
 /** @type {import('jest').Config} */
 module.exports = {
-  preset: 'ts-jest',
   testEnvironment: 'node',
   testMatch: ['**/test/**/*.test.ts'],
 
@@ -19,4 +18,12 @@ module.exports = {
   // it also holds when Jest is invoked directly (npx jest, IDE runners, CI
   // steps that bypass the scripts).
   maxWorkers: 1,
+
+  // tsconfig.json uses module/moduleResolution "Node16" and sets
+  // isolatedModules: true (ts-jest requires it for that combination,
+  // TS151002). Declaring ts-jest here, rather than the deprecated top-level
+  // `globals.ts-jest`, is also how current ts-jest expects options to be set.
+  transform: {
+    '^.+\\.ts$': ['ts-jest', {}],
+  },
 };

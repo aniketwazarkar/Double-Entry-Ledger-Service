@@ -36,4 +36,27 @@ describe('accountService', () => {
       ).rejects.toThrow(NotFoundError);
     });
   });
+
+  describe('getAllAccounts', () => {
+    it('returns an empty array when no accounts exist', async () => {
+      await expect(accountService.getAllAccounts()).resolves.toEqual([]);
+    });
+
+    it('returns all created accounts in creation order', async () => {
+      const first = await accountService.createAccount({
+        name: 'Checking',
+        currency: 'USD',
+        type: 'asset',
+      });
+      const second = await accountService.createAccount({
+        name: 'Savings',
+        currency: 'USD',
+        type: 'asset',
+      });
+
+      const all = await accountService.getAllAccounts();
+
+      expect(all).toEqual([first, second]);
+    });
+  });
 });

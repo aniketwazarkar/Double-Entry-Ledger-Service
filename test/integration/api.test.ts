@@ -47,6 +47,25 @@ describe('HTTP API', () => {
     });
   });
 
+  describe('GET /accounts', () => {
+    it('returns an empty array when no accounts exist', async () => {
+      const res = await request(app).get('/accounts');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual([]);
+    });
+
+    it('returns all created accounts', async () => {
+      const first = await createAccount({ name: 'Checking' });
+      const second = await createAccount({ name: 'Savings' });
+
+      const res = await request(app).get('/accounts');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual([first.body, second.body]);
+    });
+  });
+
   describe('GET /accounts/:id', () => {
     it('returns the account', async () => {
       const created = await createAccount({ name: 'Savings' });

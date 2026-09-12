@@ -38,6 +38,12 @@ export async function createAccount(input: CreateAccountInput): Promise<Account>
   return toAccount(row);
 }
 
+export async function getAllAccounts(): Promise<Account[]> {
+  const rows = await db<AccountRow>('accounts').orderBy('created_at', 'asc');
+
+  return rows.map(toAccount);
+}
+
 export async function getAccount(id: string): Promise<Account> {
   const row = await db<AccountRow>('accounts').where({ id }).first();
 

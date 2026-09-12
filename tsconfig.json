@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2020",
-    "module": "commonjs",
+    "module": "Node16",
     "lib": ["ES2020"],
     "outDir": "dist",
     "rootDir": ".",
@@ -10,10 +10,11 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "moduleResolution": "node",
-    "ignoreDeprecations": "5.0",
+    "moduleResolution": "Node16",
+    "isolatedModules": true,
     "declaration": false,
-    "sourceMap": true
+    "sourceMap": true,
+    "types": ["jest"]
   },
   "include": ["src", "test", "scripts", "knexfile.ts"],
   "exclude": ["node_modules", "dist"]

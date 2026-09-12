@@ -15,6 +15,15 @@ accountsRouter.post(
   })
 );
 
+// Only for FE testing purposes, not part of the public API
+accountsRouter.get(
+  '/',
+  asyncHandler(async (_req, res) => {
+    const accounts = await accountService.getAllAccounts();
+    res.status(200).json(accounts);
+  })
+);
+
 accountsRouter.get(
   '/:id',
   asyncHandler(async (req, res) => {

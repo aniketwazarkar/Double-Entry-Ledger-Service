@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ledger</title>
+<style>
+  body { font-family: monospace; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.2rem; }
+  section { margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 1px solid #ccc; }
+  h2 { font-size: 1rem; }
+  label { display: block; margin-top: 0.5rem; }
+  input, select { width: 100%; box-sizing: border-box; padding: 0.3rem; margin-top: 0.1rem; }
+  button { margin-top: 0.75rem; padding: 0.4rem 0.8rem; }
+  pre { background: #f4f4f4; padding: 0.5rem; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+  table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+  td, th { text-align: left; border-bottom: 1px solid #ddd; padding: 0.25rem; font-size: 0.9em; }
+</style>
+</head>
+<body>
+
+<h1>Ledger</h1>
+
+<section id="create-account">
+  <h2>Create Account</h2>
+  <label>Name<input id="ca-name"></label>
+  <label>Currency<input id="ca-currency" value="USD"></label>
+  <label>Type
+    <select id="ca-type">
+      <option value="asset">asset</option>
+      <option value="liability">liability</option>
+      <option value="equity">equity</option>
+    </select>
+  </label>
+  <label>Initial balance (optional, minor units)<input id="ca-balance" placeholder="e.g. 5000"></label>
+  <label>Fund from account (required if initial balance is set)
+    <select id="ca-fund-from"><option value="">— select —</option></select>
+  </label>
+  <button onclick="createAccount()">Create</button>
+  <pre id="ca-result"></pre>
+</section>
+
+<section id="accounts">
+  <h2>Known Accounts</h2>
+  <table id="accounts-table">
+    <thead><tr><th>Name</th><th>Type</th><th>Currency</th><th>Id</th><th>Balance</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <pre id="accounts-result"></pre>
+</section>
+
+<section id="statement">
+  <h2>Account Statement</h2>
+  <label>Account Id<input id="st-id"></label>
+  <label>Limit<input id="st-limit" value="20"></label>
+  <button onclick="getStatement()">Fetch Statement</button>
+  <pre id="st-result"></pre>
+</section>
+
+<section id="transfer">
+  <h2>Transfer</h2>
+  <label>From Account Id<input id="tr-from"></label>
+  <label>To Account Id<input id="tr-to"></label>
+  <label>Amount (minor units)<input id="tr-amount" value="100"></label>
+  <label>Currency<input id="tr-currency" value="USD"></label>
+  <label>Description<input id="tr-desc"></label>
+  <label>Idempotency Key<input id="tr-key"></label>
+  <button onclick="transfer()">Transfer</button>
+  <pre id="tr-result"></pre>
+</section>
+
+<section id="transaction">
+  <h2>Transaction Lookup</h2>
+  <label>Transaction Id<input id="tx-id"></label>
+  <button onclick="getTransaction()">Fetch Transaction</button>
+  <pre id="tx-result"></pre>
+</section>
+
+<script>
+async function api(method, url, body) {
+  const res = await fetch(url, {
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = text; }
+  if (!res.ok) throw { status: res.status, data };
+  return data;
+}
+
+function show(el, value) {
+  document.getElementById(el).textContent =
+    typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+}
+
+async function createAccount() {
+  const name = document.getElementById('ca-name').value.trim();
+  const currency = document.getElementById('ca-currency').value.trim();
+  const type = document.getElementById('ca-type').value;
+  const balanceInput = document.getElementById('ca-balance').value.trim();
+  const fundFrom = document.getElementById('ca-fund-from').value;
+
+  if (balanceInput && !fundFrom) {
+    show('ca-result', 'Pick a "Fund from account" to set an initial balance.');
+    return;
+  }
+
+  try {
+    const account = await api('POST', '/accounts', { name, currency, type });
+    let result = account;
+
+    if (balanceInput) {
+      const transferResult = await api('POST', '/transfers', {
+        idempotencyKey: crypto.randomUUID(),
+        fromAccountId: fundFrom,
+        toAccountId: account.id,
+        amount: Number(balanceInput),
+        currency,
+        description: 'initial balance',
+      });
+      result = { account, fundingTransfer: transferResult };
+    }
+
+    show('ca-result', result);
+    document.getElementById('ca-balance').value = '';
+    renderAccounts();
+  } catch (e) {
+    show('ca-result', e.data || String(e));
+  }
+}
+
+async function refreshBalance(id, cellId) {
+  try {
+    const { balance } = await api('GET', `/accounts/${id}/balance`);
+    document.getElementById(cellId).textContent = balance;
+  } catch (e) {
+    document.getElementById(cellId).textContent = 'error';
+  }
+}
+
+async function renderAccounts() {
+  const tbody = document.querySelector('#accounts-table tbody');
+  const fundFromSelect = document.getElementById('ca-fund-from');
+  try {
+    const accounts = await api('GET', '/accounts');
+    tbody.innerHTML = '';
+
+    const selected = fundFromSelect.value;
+    fundFromSelect.innerHTML = '<option value="">— select —</option>';
+    accounts.forEach((a) => {
+      const opt = document.createElement('option');
+      opt.value = a.id;
+      opt.textContent = `${a.name} (${a.id})`;
+      fundFromSelect.appendChild(opt);
+    });
+    fundFromSelect.value = selected;
+
+    accounts.forEach((a, i) => {
+      const balanceCellId = `bal-${i}`;
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${a.name}</td>
+        <td>${a.type}</td>
+        <td>${a.currency}</td>
+        <td>${a.id}</td>
+        <td id="${balanceCellId}">…</td>
+        <td><button onclick="useForStatement('${a.id}')">Statement</button></td>
+      `;
+      tbody.appendChild(tr);
+      refreshBalance(a.id, balanceCellId);
+    });
+  } catch (e) {
+    show('accounts-result', e.data || String(e));
+  }
+}
+
+function useForStatement(id) {
+  document.getElementById('st-id').value = id;
+  getStatement();
+}
+
+async function getStatement() {
+  const id = document.getElementById('st-id').value.trim();
+  const limit = document.getElementById('st-limit').value.trim();
+  const qs = limit ? `?limit=${encodeURIComponent(limit)}` : '';
+  try {
+    const page = await api('GET', `/accounts/${id}/statement${qs}`);
+    show('st-result', page);
+  } catch (e) {
+    show('st-result', e.data || String(e));
+  }
+}
+
+async function transfer() {
+  const body = {
+    idempotencyKey: document.getElementById('tr-key').value.trim() || crypto.randomUUID(),
+    fromAccountId: document.getElementById('tr-from').value.trim(),
+    toAccountId: document.getElementById('tr-to').value.trim(),
+    amount: Number(document.getElementById('tr-amount').value),
+    currency: document.getElementById('tr-currency').value.trim(),
+    description: document.getElementById('tr-desc').value.trim() || null,
+  };
+  try {
+    const result = await api('POST', '/transfers', body);
+    show('tr-result', result);
+    renderAccounts();
+  } catch (e) {
+    show('tr-result', e.data || String(e));
+  }
+}
+
+async function getTransaction() {
+  const id = document.getElementById('tx-id').value.trim();
+  try {
+    const result = await api('GET', `/transactions/${id}`);
+    show('tx-result', result);
+  } catch (e) {
+    show('tx-result', e.data || String(e));
+  }
+}
+
+renderAccounts();
+</script>
+
+</body>
+</html>
