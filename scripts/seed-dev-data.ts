@@ -6,32 +6,33 @@ import * as transferService from '../src/services/transferService';
 import db from '../src/db/knex';
 
 async function main() {
-  const alice = await accountService.createAccount({ name: 'Alice Wallet', currency: 'USD', type: 'liability' });
-  const bob = await accountService.createAccount({ name: 'Bob Wallet', currency: 'USD', type: 'liability' });
+  const aniket = await accountService.createAccount({ name: 'Aniket\'s Wallet', currency: 'USD', type: 'liability' });
+  const virat = await accountService.createAccount({ name: 'Virat\'s Wallet', currency: 'USD', type: 'liability' });
   const promos = await accountService.createAccount({ name: 'Promotions Funding', currency: 'USD', type: 'equity' });
   const merchant = await accountService.createAccount({ name: 'Coffee Shop', currency: 'USD', type: 'liability' });
+  const refunds = await accountService.createAccount({ name: 'Refunds', currency: 'USD', type: 'equity' });
 
   await transferService.transfer({
-    idempotencyKey: 'seed-topup-alice',
+    idempotencyKey: 'seed-topup-aniket',
     fromAccountId: promos.id,
-    toAccountId: alice.id,
+    toAccountId: aniket.id,
     amount: 5000,
     currency: 'USD',
     description: 'wallet top-up',
   });
 
   await transferService.transfer({
-    idempotencyKey: 'seed-cashback-bob',
+    idempotencyKey: 'seed-cashback-virat',
     fromAccountId: promos.id,
-    toAccountId: bob.id,
+    toAccountId: virat.id,
     amount: 200,
     currency: 'USD',
     description: 'cashback:campaign-42',
   });
 
   await transferService.transfer({
-    idempotencyKey: 'seed-purchase-alice-coffee',
-    fromAccountId: alice.id,
+    idempotencyKey: 'seed-purchase-aniket-coffee',
+    fromAccountId: aniket.id,
     toAccountId: merchant.id,
     amount: 450,
     currency: 'USD',
@@ -41,23 +42,32 @@ async function main() {
   await transferService.transfer({
     idempotencyKey: 'seed-refund-coffee',
     fromAccountId: merchant.id,
-    toAccountId: alice.id,
+    toAccountId: aniket.id,
     amount: 450,
     currency: 'USD',
-    description: 'refund_of:seed-purchase-alice-coffee',
+    description: 'refund_of:seed-purchase-aniket-coffee',
   });
 
   await transferService.transfer({
-    idempotencyKey: 'seed-alice-to-bob',
-    fromAccountId: alice.id,
-    toAccountId: bob.id,
+    idempotencyKey: 'seed-aniket-to-virat',
+    fromAccountId: aniket.id,
+    toAccountId: virat.id,
     amount: 1000,
     currency: 'USD',
     description: 'splitting dinner',
   });
 
+  await transferService.transfer({
+    idempotencyKey: 'seed-refund-virat',
+    fromAccountId: refunds.id,
+    toAccountId: virat.id,
+    amount: 1000,
+    currency: 'USD',
+    description: 'refund_of:seed-aniket-to-virat',
+  });
+
   console.log('Seeded accounts:');
-  console.log({ alice: alice.id, bob: bob.id, promos: promos.id, merchant: merchant.id });
+  console.log({ aniket: aniket.id, virat: virat.id, promos: promos.id, merchant: merchant.id });
 
   await db.destroy();
 }

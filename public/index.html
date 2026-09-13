@@ -101,8 +101,9 @@ async function createAccount() {
   const type = document.getElementById('ca-type').value;
   const balanceInput = document.getElementById('ca-balance').value.trim();
   const fundFrom = document.getElementById('ca-fund-from').value;
+  const hasInitialBalance = balanceInput !== '' && Number(balanceInput) > 0;
 
-  if (balanceInput && !fundFrom) {
+  if (hasInitialBalance && !fundFrom) {
     show('ca-result', 'Pick a "Fund from account" to set an initial balance.');
     return;
   }
@@ -111,7 +112,7 @@ async function createAccount() {
     const account = await api('POST', '/accounts', { name, currency, type });
     let result = account;
 
-    if (balanceInput) {
+    if (hasInitialBalance) {
       const transferResult = await api('POST', '/transfers', {
         idempotencyKey: crypto.randomUUID(),
         fromAccountId: fundFrom,
