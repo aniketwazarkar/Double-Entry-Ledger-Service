@@ -1,6 +1,6 @@
 import db from '../db/knex';
 import { Direction, Entry, Transaction } from '../domain/types';
-import { NotFoundError } from '../domain/errors';
+import { NotFoundError, ValidationError } from '../domain/errors';
 
 export interface TransactionWithEntries {
   transaction: Transaction;
@@ -49,6 +49,10 @@ function toEntry(row: EntryRow): Entry {
 
 /** Debit leg first, then credit, so callers see a stable order on both paths. */
 export async function getTransactionWithEntries(id: string): Promise<TransactionWithEntries> {
+  if (typeof id !== 'string' || id.trim() === '') {
+    throw new ValidationError('id is required');
+  }
+
   const transactionRow = await db<TransactionRow>('transactions').where({ id }).first();
 
   if (!transactionRow) {

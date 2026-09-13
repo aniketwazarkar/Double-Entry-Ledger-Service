@@ -32,10 +32,6 @@
       <option value="equity">equity</option>
     </select>
   </label>
-  <label>Initial balance (optional, minor units)<input id="ca-balance" placeholder="e.g. 5000"></label>
-  <label>Fund from account (required if initial balance is set)
-    <select id="ca-fund-from"><option value="">— select —</option></select>
-  </label>
   <button onclick="createAccount()">Create</button>
   <pre id="ca-result"></pre>
 </section>
@@ -99,33 +95,10 @@ async function createAccount() {
   const name = document.getElementById('ca-name').value.trim();
   const currency = document.getElementById('ca-currency').value.trim();
   const type = document.getElementById('ca-type').value;
-  const balanceInput = document.getElementById('ca-balance').value.trim();
-  const fundFrom = document.getElementById('ca-fund-from').value;
-  const hasInitialBalance = balanceInput !== '' && Number(balanceInput) > 0;
-
-  if (hasInitialBalance && !fundFrom) {
-    show('ca-result', 'Pick a "Fund from account" to set an initial balance.');
-    return;
-  }
 
   try {
     const account = await api('POST', '/accounts', { name, currency, type });
-    let result = account;
-
-    if (hasInitialBalance) {
-      const transferResult = await api('POST', '/transfers', {
-        idempotencyKey: crypto.randomUUID(),
-        fromAccountId: fundFrom,
-        toAccountId: account.id,
-        amount: Number(balanceInput),
-        currency,
-        description: 'initial balance',
-      });
-      result = { account, fundingTransfer: transferResult };
-    }
-
-    show('ca-result', result);
-    document.getElementById('ca-balance').value = '';
+    show('ca-result', account);
     renderAccounts();
   } catch (e) {
     show('ca-result', e.data || String(e));
@@ -143,20 +116,9 @@ async function refreshBalance(id, cellId) {
 
 async function renderAccounts() {
   const tbody = document.querySelector('#accounts-table tbody');
-  const fundFromSelect = document.getElementById('ca-fund-from');
   try {
     const accounts = await api('GET', '/accounts');
     tbody.innerHTML = '';
-
-    const selected = fundFromSelect.value;
-    fundFromSelect.innerHTML = '<option value="">— select —</option>';
-    accounts.forEach((a) => {
-      const opt = document.createElement('option');
-      opt.value = a.id;
-      opt.textContent = `${a.name} (${a.id})`;
-      fundFromSelect.appendChild(opt);
-    });
-    fundFromSelect.value = selected;
 
     accounts.forEach((a, i) => {
       const balanceCellId = `bal-${i}`;
