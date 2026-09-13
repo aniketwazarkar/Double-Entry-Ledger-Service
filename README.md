@@ -11,7 +11,8 @@ This is the architecture flow of this application: requests pass through the Exp
 ## Run locally
 
 ```bash
-docker compose up --build
+- colima start
+- docker compose up --build
 ```
 
 Postgres starts, the app waits for it to be healthy, runs migrations, and listens on `localhost:3000`.
