@@ -64,27 +64,10 @@ function toEntry(row: EntryRow): Entry {
 }
 
 /**
- * Validates the request and returns it with account ids canonicalised.
- *
- * Account ids are lowercased here, once, and the normalised copy is what the
- * rest of this module uses. PostgreSQL's `uuid` type compares case-insensitively
- * and always renders back as lowercase, so a caller may legitimately pass
- * `A1B2...` and have it match a row stored as `a1b2...`. Carrying the caller's
- * raw casing any further breaks three things at once:
- *
- *  - the self-transfer guard below, which would let `A1B2...` -> `a1b2...`
- *    through as if the two were different accounts;
- *  - the lock map in `lockAccounts`, which is keyed by the id PostgreSQL
- *    returned (lowercase) and would miss on a raw uppercase lookup, producing a
- *    spurious NotFoundError for a row that was in fact found and locked;
- *  - and most seriously the lock *ordering*, because ASCII sorts every uppercase
- *    letter before every lowercase one. Two concurrent transfers over the same
- *    pair, one spelling an id uppercase and the other lowercase, would sort into
- *    opposite orders and deadlock — the exact failure this service's lock
- *    ordering exists to prevent.
- *
- * Normalising before any of those three consumers run is what keeps them
- * consistent, which is why it happens here rather than at each use site.
+ * Validates the request and lowercases both account ids once, up front.
+ * Postgres uuid comparison is case-insensitive, so without this a same-account
+ * transfer could slip past the self-transfer check, and mixed-case ids for the
+ * same pair could sort into a different lock order and deadlock.
  */
 function normalizeAndValidate(input: TransferInput): TransferInput {
   if (typeof input.idempotencyKey !== 'string' || input.idempotencyKey.trim() === '') {
@@ -111,8 +94,7 @@ function normalizeAndValidate(input: TransferInput): TransferInput {
   if (normalized.fromAccountId === normalized.toAccountId) {
     throw new ValidationError('fromAccountId and toAccountId must differ');
   }
-  // Rejects floats, NaN, Infinity and anything beyond 2^53-1 (which could not be
-  // round-tripped through the bigint column as a JS number).
+  // Must be a safe integer so it round-trips cleanly through the bigint column.
   if (!Number.isSafeInteger(normalized.amount)) {
     throw new ValidationError('amount must be an integer number of minor units');
   }
@@ -124,35 +106,20 @@ function normalizeAndValidate(input: TransferInput): TransferInput {
 }
 
 /**
- * Locks the two accounts FOR UPDATE, always in ascending id order.
- *
- * Deadlock avoidance rests entirely on this ordering. Two concurrent transfers
- * A->B and B->A touch the same pair of rows; if each locked its own "from"
- * account first they would grab the rows in opposite orders and deadlock. By
- * sorting the ids and issuing the locks as two separate, explicitly ordered
- * statements, every transfer on a given pair requests the lower id first, so the
- * wait-for graph can never contain a cycle.
- *
- * Two statements rather than one `WHERE id IN (...) ORDER BY id FOR UPDATE`: the
- * single-statement form does normally lock in sorted order, but the guarantee is
- * a property of the chosen plan rather than of the SQL, so the ordering is made
- * explicit here instead.
+ * Locks both accounts FOR UPDATE in ascending id order (not "from" then "to").
+ * This is what prevents deadlocks: two opposite transfers over the same pair
+ * always request the lower id first, so lock order can never cycle.
  */
 async function lockAccounts(
   trx: Knex.Transaction,
   input: TransferInput
 ): Promise<Map<string, { id: string; currency: string }>> {
-  // Ids arrive already lowercased by normalizeAndValidate, so this sorts
-  // canonical spellings and every caller derives the same order for a pair.
   const orderedIds = [input.fromAccountId, input.toAccountId].sort();
   const locked = new Map<string, { id: string; currency: string }>();
 
   for (const id of orderedIds) {
     const row = await trx('accounts').select('id', 'currency').where({ id }).forUpdate().first();
     if (row) {
-      // Keyed by the id we looked up, not by row.id. Both are canonical
-      // lowercase here, but keying off the lookup value keeps this map
-      // addressable by exactly the ids the caller side uses.
       locked.set(id, row);
     }
   }
@@ -208,12 +175,8 @@ async function entriesFor(trx: Knex.Transaction, transactionId: string): Promise
 }
 
 export async function transfer(rawInput: TransferInput): Promise<TransferResult> {
-  // Boundary validation happens before any connection is taken: a malformed
-  // request must never open a database transaction.
-  //
-  // The result shadows the parameter deliberately: everything below this line
-  // sees only the normalised ids, so no use site can accidentally reach for the
-  // caller's raw casing.
+  // Validate before opening a DB transaction, and shadow rawInput so the rest
+  // of this function can only see the normalised (lowercased) ids.
   const input = normalizeAndValidate(rawInput);
 
   return db.transaction(async (trx) => {
@@ -221,17 +184,10 @@ export async function transfer(rawInput: TransferInput): Promise<TransferResult>
     assertAccount(locked, input.fromAccountId, input.currency, 'source');
     assertAccount(locked, input.toAccountId, input.currency, 'destination');
 
-    // Claim the idempotency key. DO NOTHING means a replay returns no row.
-    //
-    // On the racing path (two concurrent requests, same brand-new key), the
-    // loser's INSERT does not return immediately: PostgreSQL's speculative
-    // insertion blocks on the winner's transaction id until it commits or
-    // aborts. Only then does this statement resolve — as "no row inserted" if
-    // the winner committed, or as a successful insert if it rolled back. Under
-    // READ COMMITTED (the default here) the following SELECT takes a fresh
-    // snapshot, so the winner's row is already visible to it. There is
-    // therefore no window in which the insert reports a conflict but the
-    // fallback fetch finds nothing.
+    // Claim the idempotency key; ON CONFLICT DO NOTHING means a replay gets no row
+    // back. If two concurrent requests race on the same new key, Postgres blocks
+    // the loser until the winner commits, so by the time we fall through to the
+    // SELECT below, the winner's row is guaranteed to be visible.
     const inserted = await trx.raw<{ rows: TransactionRow[] }>(
       `INSERT INTO transactions (idempotency_key, description)
        VALUES (?, ?)
@@ -250,20 +206,16 @@ export async function transfer(rawInput: TransferInput): Promise<TransferResult>
         .first();
 
       if (!existing) {
-        // Unreachable under READ COMMITTED (see above). Fail loudly rather than
+        // Should be unreachable (see comment above) — fail loudly instead of
         // silently inventing a second transaction for the same key.
         throw new Error(
           `idempotency key ${input.idempotencyKey} conflicted on insert but could not be read back`
         );
       }
 
-      // Sequential, not Promise.all: a Knex transaction is pinned to one
-      // connection, so concurrent queries on it buy nothing and only muddy
-      // failure handling.
+      // Sequential (not Promise.all) since a Knex transaction is one connection.
       const entries = await entriesFor(trx, existing.id);
-      // Balances are read now, inside the same locked transaction, so they
-      // reflect current state (including transfers made after the original)
-      // rather than a stale snapshot from when the original was written.
+      // Read balances now, in this locked transaction, so they're current.
       const balances = await balancesFor(trx, [input.fromAccountId, input.toAccountId]);
 
       return {
@@ -275,9 +227,8 @@ export async function transfer(rawInput: TransferInput): Promise<TransferResult>
       };
     }
 
-    // Exactly one debit (source) and one credit (destination), in one
-    // multi-row insert, inside this transaction. The deferred balance-invariant
-    // trigger checks the pair at COMMIT.
+    // One debit (source) + one credit (destination); a DB trigger checks the
+    // pair balances at COMMIT.
     const entryRows = await trx<EntryRow>('entries')
       .insert([
         {
