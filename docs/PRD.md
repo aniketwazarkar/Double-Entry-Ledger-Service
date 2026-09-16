@@ -1,132 +1,113 @@
-# PRD: Double-Entry Ledger Service
+# Double-Entry Ledger Service — PRD
 
-## Context
+## Why we're building this
 
-This is a greenfield take-home assignment: build a ledger service that is the system of record for money movement inside a product. Three consumer classes depend on it:
+We need a ledger that acts as the single source of truth for money movement across the product. Three groups depend on it, and they don't all care about the same things:
 
-- **Product engineers** (wallets, credits, promotions, refunds) need one API to answer "how much does this account hold, and how did it get there" — correct even under heavy concurrency.
-- **Finance** needs to read any account like a bank statement: ordered movements with a running balance, and immutable history (yesterday's numbers never change).
-- **Calling services** retry on timeout, so a retried request must never move money twice.
+- **Product engineers** (wallets, credits, promos, refunds) want one API they can hit to answer "how much is in this account, and how did it get there" — and it has to hold up under real concurrency, not just in a demo.
+- **Finance** wants to be able to pull any account like a bank statement: entries in order, with a running balance, and history that never quietly changes after the fact.
+- **Calling services** will retry on timeout. A retried call can never move money twice.
 
-The non-negotiable invariant: **at all times, under any concurrency, sum(debits) == sum(credits)**. The system must be able to *prove* this holds, not just assert it — this drives the architecture (DB-enforced constraints, not application-level trust) and the deliverables (a concurrency test that actually exercises the invariant).
+The one rule that can't bend: at any moment, under any amount of concurrent traffic, `sum(debits) == sum(credits)`. We're not going to just assert that's true — we want to be able to prove it, which is really what shapes the whole architecture. That means pushing the invariant down into the database instead of trusting application code, and it means shipping a concurrency test that actually tries to break the thing.
 
-Stack decisions already made with the user: **Node.js + TypeScript + PostgreSQL**, **Docker Compose** for local run, **DB-enforced invariant + concurrency test suite** as the correctness strategy, **client-supplied idempotency key**, **single-currency-per-account / multi-currency system**, and a **balance + paginated statement-with-running-balance** query API.
+Stack's already settled: Node.js + TypeScript on Postgres, Docker Compose to run it locally, a DB-enforced invariant backed by a concurrency test suite, idempotency keys supplied by the client, one currency per account (but the system itself is multi-currency), and a balance endpoint plus a paginated statement with a running balance.
 
-## Domain Model
+## Domain model
 
-Classic double-entry bookkeeping, adapted for a product ledger:
+Standard double-entry bookkeeping, just adapted for a product context:
 
-- **Account**: `id`, `name`, `currency` (ISO 4217 or custom code, e.g. `USD`, `POINTS`), `type` (e.g. `asset`, `liability`, `equity` — needed so "normal balance side" is well-defined and external funding sources net to zero), `created_at`. Balance is *never* a stored mutable column — it is derived (or materialized+reconciled) from entries.
-- **Transaction**: the atomic, immutable unit of money movement. `id`, `idempotency_key` (unique), `description`/`metadata`, `created_at`. A transaction groups two or more **entries** and by construction must balance.
-- **Entry** (a.k.a. ledger line / posting): `id`, `transaction_id`, `account_id`, `direction` (`debit`|`credit`), `amount` (positive, minor units — integer, never float), `currency` (must match the account's currency), `created_at`. Entries are append-only, never updated or deleted.
-- Invariant enforced per-transaction (not just globally): `sum(debit amounts) == sum(credit amounts)` for every transaction, and every transaction has ≥2 entries touching ≥2 distinct accounts. Global invariant is a corollary of this holding for every row ever inserted.
+**Account** — `id`, `name`, `currency` (ISO 4217, or a custom code like `POINTS`), `type` (`asset` / `liability` / `equity` — we need this so "which side is the normal balance on" is unambiguous, and so external funding sources net out to zero), `created_at`. Balance is never a column we write to directly — it's always derived from entries, whether that's computed live or cached and reconciled.
 
-Money movement (`transfer`) is expressed as: create one Transaction with exactly one debit entry and one credit entry (extendable to multi-leg transactions for splits/fees later, same mechanism). No API creates money from nothing — every entry requires a matching opposite entry in the same transaction, so value only ever moves between accounts.
+**Transaction** — the atomic, immutable unit. `id`, `idempotency_key` (unique), `description`/`metadata`, `created_at`. Groups two or more entries, and by construction has to balance.
 
-## Domain Usage Scenarios
+**Entry** (ledger line, posting, whatever you want to call it) — `id`, `transaction_id`, `account_id`, `direction` (`debit`/`credit`), `amount` (positive, integer minor units — never a float), `currency` (has to match the account's), `created_at`. Entries are append-only. Nothing ever updates or deletes one.
 
-These worked examples show how product-level concepts (which the ledger has no special knowledge of) map onto plain transfers between accounts. In every case, the ledger only ever executes `POST /transfers` — there is no promotion-, refund-, or wallet-specific code path in the ledger itself; the calling service is responsible for choosing the right `from`/`to` accounts.
+The invariant is enforced per-transaction, not just globally: for every transaction, `sum(debit amounts) == sum(credit amounts)`, and every transaction touches at least two entries across at least two distinct accounts. If that holds for every row that's ever inserted, the global invariant just falls out of it for free.
 
-**1. Wallet top-up (user adds money via a payment provider)**
+A **transfer** is one Transaction with exactly one debit entry and one credit entry. There's no way to create money from nothing — every entry needs a matching opposite entry in the same transaction, so value only ever moves between accounts, it's never conjured.
 
-- Accounts involved: `payments_clearing` (type `asset` — represents money received from the payment processor, pending settlement), `user_123_wallet` (type `liability` — money the company owes back to the user on demand).
-- On successful payment capture: `transfer(from: payments_clearing, to: user_123_wallet, amount: 5000, currency: USD)`.
-- Result: `user_123_wallet` balance +5000. `payments_clearing` balance -5000 (offset later by the company's own settlement/reconciliation process outside this ledger's scope, or by a further transfer once funds are swept to a bank-holding account — not modeled here).
+## How this maps to real product scenarios
 
-**2. Cashback / promotional credit**
+The ledger itself has no idea what a "wallet" or a "refund" is — it only ever executes `POST /transfers`. All the product-specific meaning lives in which accounts the calling service picks. A few worked examples to make that concrete:
 
-- Accounts involved: `promotions_funding` (type `equity` — represents cumulative promotional spend, expected to run negative over time, which is normal and expected, not an error condition), `user_123_wallet`.
-- The **promotion service** decides eligibility, amount, and campaign attribution (all outside the ledger). Once decided, it calls `transfer(from: promotions_funding, to: user_123_wallet, amount: 200, currency: USD, description: "cashback:campaign-42")`.
-- The ledger enforces only that this is a real transfer between two real accounts of matching currency — it has no concept of "campaign" or "cashback"; that context lives in the `description`/metadata field for traceability, not in ledger business logic.
-- Finance can see the running total the company has given away by reading `promotions_funding`'s statement, since it is a real account like any other.
+**Wallet top-up.** User adds money via a payment provider. `payments_clearing` (asset — money received from the processor, pending settlement) and `user_123_wallet` (liability — what the company owes the user on demand). On a successful capture: `transfer(from: payments_clearing, to: user_123_wallet, amount: 5000, currency: USD)`. The wallet goes up 5000, clearing goes down 5000 (that gets offset later by settlement/reconciliation outside the ledger's scope — not something we model here).
 
-**3. Refund (full or partial reversal of a prior transfer)**
+**Cashback / promo credit.** `promotions_funding` (equity — running total of promotional spend; it's expected to go negative over time, that's not a bug) and `user_123_wallet`. The promotion service decides eligibility, amount, and campaign attribution — none of that is the ledger's business. Once it's decided, it just calls `transfer(from: promotions_funding, to: user_123_wallet, amount: 200, currency: USD, description: "cashback:campaign-42")`. The ledger only checks that it's a real transfer between two real accounts with matching currency; "campaign" lives in the description field for traceability, not in any ledger logic. Finance can see the total giveaway by reading `promotions_funding`'s statement like any other account.
 
-- The original transaction's entries are never modified or deleted — the ledger is append-only by design (Global Constraints).
-- A refund is a **new transfer** in the reverse direction: if the original was `transfer(from: user_123_wallet, to: merchant_456_account, amount: 1500)`, a full refund is `transfer(from: merchant_456_account, to: user_123_wallet, amount: 1500, idempotency_key: "refund-of-<original_transaction_id>")`. A partial refund uses a smaller `amount`.
-- The optional `description`/metadata field on the new transaction can reference the original transaction's id (e.g. `"refund_of": "<original_transaction_id>"`) purely for reporting/traceability — this is a convention for callers, not a structural foreign key the ledger enforces, since a transaction has no business rule tying it to another transaction.
-- The calling service is responsible for choosing a fresh, deterministic `idempotency_key` for the refund (e.g. derived from the original transaction id) so a retried refund request doesn't double-refund.
+**Refund.** Entries from the original transaction never get touched — append-only, no exceptions. A refund is just a new transfer going the other way. If the original was `transfer(from: user_123_wallet, to: merchant_456_account, amount: 1500)`, a full refund is `transfer(from: merchant_456_account, to: user_123_wallet, amount: 1500, idempotency_key: "refund-of-<original_transaction_id>")`. Partial refund, smaller amount, same idea. The new transaction's metadata can point back at the original id for reporting — that's a convention callers follow, not something the ledger enforces as a foreign key, since one transaction has no structural relationship to another. It's on the calling service to pick a deterministic idempotency key for the refund (derived from the original transaction's id, say) so a retried refund request doesn't double-refund someone.
 
-**4. Fee split (e.g. a purchase where the platform takes a cut)**
+## API surface
 
-- Out of scope for the initial API (which models a transfer as exactly one debit + one credit — see Domain Model), but the schema already supports it without redesign: a "split" is a single Transaction with more than two entries (e.g. debit buyer 1000, credit merchant 950, credit platform_fees 50), still subject to the same per-transaction balance trigger. This is noted here so it's clear the two-entry `/transfers` endpoint is a special case of the general model, not a structural limit.
+- `POST /accounts` — create an account (`name`, `currency`, `type`)
+- `GET /accounts/:id` — account metadata
+- `GET /accounts/:id/balance` — current balance, or pass `as_of` for a point-in-time balance (sums entries up to that timestamp)
+- `POST /transfers` — move money between two accounts. Body: `idempotency_key`, `from_account_id`, `to_account_id`, `amount`, `currency`, `description`. Both accounts need matching currency. Returns the created transaction plus resulting balances. Replay the same idempotency key and you get the original result back (same status, same body) instead of a second movement.
+- `GET /accounts/:id/statement` — paginated, time-ordered entries for an account, each row showing amount, direction, the counterparty transaction, and the running balance right after that entry — bank statement style. Pagination is keyset-based on `(created_at, entry_id)` so history stays stable even while new entries keep landing.
+- `GET /transactions/:id` — full detail on a transaction, all its entries, for audit/debugging.
 
-## API Surface
+All amounts are integers, minor units. Float amounts, zero/negative amounts, cross-currency transfers, and unknown accounts all get rejected with clear 4xx errors.
 
-- `POST /accounts` — create an account (`name`, `currency`, `type`).
-- `GET /accounts/:id` — account metadata.
-- `GET /accounts/:id/balance` — current balance (optionally `as_of` timestamp for a point-in-time balance, computed by summing entries up to that time).
-- `POST /transfers` — move money between two accounts. Body: `idempotency_key`, `from_account_id`, `to_account_id`, `amount`, `currency`, `description`. Requires same-currency accounts. Returns the created Transaction + resulting balances. Replaying the same `idempotency_key` returns the original result (200/201, same body) instead of creating a second movement.
-- `GET /accounts/:id/statement` — paginated, time-ordered list of entries for the account, each row showing amount, direction, counterparty transaction, and **running balance after that entry** (bank-statement semantics). Cursor-based pagination (keyset on `(created_at, entry_id)`) so history is stable even as new entries are appended concurrently.
-- `GET /transactions/:id` — full detail of a transaction (all its entries), for audit/debugging.
+### Error contract
 
-All amounts are integers in minor units; API rejects float amounts, zero/negative amounts, cross-currency transfers, and unknown accounts with clear 4xx errors.
-
-### Error Contract
-
-Every error response is JSON: `{ "error": "<ErrorName>", "message": "<human-readable detail>" }` (validation errors additionally include a `details` array of per-field issues). Status codes are fixed per error type so callers can branch on the code alone without parsing `message`:
+Every error comes back as `{ "error": "<ErrorName>", "message": "<human-readable detail>" }`, and validation errors also carry a `details` array with the per-field issues. Status codes are fixed per error type so callers can branch on the code without parsing the message:
 
 | Scenario | HTTP Status | `error` value | Notes |
 |---|---|---|---|
-| Malformed/missing request field (e.g. non-UUID account id, missing `idempotencyKey`) | 400 | `ValidationError` | Includes zod's `details` array (path + issue per field). |
-| Non-integer, zero, or negative `amount` | 400 | `ValidationError` | Amounts are minor-unit integers only; floats are rejected before any DB call. |
-| `fromAccountId` equals `toAccountId` | 400 | `ValidationError` | A transfer must move value between two distinct accounts. |
-| Transfer currency doesn't match one or both accounts' currency | 400 | `CurrencyMismatchError` | No implicit conversion; caller must transfer in the accounts' shared currency. |
-| Referenced account does not exist | 404 | `NotFoundError` | Applies to `GET /accounts/:id`, `GET /accounts/:id/balance`, `GET /accounts/:id/statement`, and either side of `POST /transfers`. |
-| Referenced transaction does not exist | 404 | `NotFoundError` | `GET /transactions/:id`. |
-| Repeated `idempotencyKey` with an **identical** request | 200 (not 201) | — (not an error) | Returns the original transaction body unchanged; `replayed: true` in the response signals no new movement occurred. |
-| Repeated `idempotencyKey` with a **different** `fromAccountId`/`toAccountId`/`amount`/`currency` than the original request | 200 | — (not an error in this iteration) | The stored transaction wins; the mismatched fields in the new request are silently ignored. Flagged here as a known sharp edge — see Out of Scope note below — rather than silently modeled as correct behavior. |
-| Unexpected server/DB error | 500 | `InternalError` | Never leaks stack traces or raw DB error text to the client; logged server-side only. |
+| Malformed/missing field (non-UUID account id, missing `idempotencyKey`, etc.) | 400 | `ValidationError` | Includes zod's `details` array — path plus issue per field. |
+| Non-integer, zero, or negative `amount` | 400 | `ValidationError` | Amounts are minor-unit integers only; floats get rejected before we ever touch the DB. |
+| `fromAccountId` equals `toAccountId` | 400 | `ValidationError` | A transfer has to move value between two distinct accounts. |
+| Transfer currency doesn't match one or both accounts | 400 | `CurrencyMismatchError` | No implicit conversion — you transfer in the accounts' shared currency or not at all. |
+| Referenced account doesn't exist | 404 | `NotFoundError` | Covers `GET /accounts/:id`, `.../balance`, `.../statement`, and either side of `POST /transfers`. |
+| Referenced transaction doesn't exist | 404 | `NotFoundError` | `GET /transactions/:id`. |
+| Same `idempotencyKey`, identical request | 200 (not 201) | — not an error | Returns the original transaction unchanged, with `replayed: true` so the caller knows nothing new happened. |
+| Same `idempotencyKey`, but `fromAccountId`/`toAccountId`/`amount`/`currency` differ from the original | 200 | — not an error, for now | The stored transaction wins; whatever's different in the new request just gets ignored. Calling this out explicitly as a known sharp edge rather than pretending it's fine — see the note below. |
+| Unexpected server/DB error | 500 | `InternalError` | Never leaks a stack trace or raw DB error text to the client; that gets logged server-side only. |
 
-**Known edge case, explicitly out of scope for this iteration:** the API does not detect or reject an idempotency-key replay whose *other* fields differ from the original request (e.g. same key, different amount) — it always returns the original transaction, which may surprise a caller who changed the amount and expected an error. A stricter implementation would hash the full request payload alongside the key and return `409 Conflict` on a mismatch; noted here as a candidate follow-up rather than built now, to keep the idempotency mechanism to the single DB unique-constraint approach described in Correctness & Concurrency Strategy.
+**Worth flagging:** right now the API won't notice (or reject) a replayed idempotency key whose other fields don't match the original — same key, different amount, and it'll just hand back the original transaction. That could genuinely surprise a caller who thought they were sending something new. The stricter fix is to hash the full payload alongside the key and 409 on a mismatch, but that's more than we need for this iteration — noted as a follow-up rather than something we're quietly shipping as "correct."
 
-## Correctness & Concurrency Strategy
+## Correctness and concurrency — where most of the risk lives
 
-This is the core engineering risk in the assignment, so it gets the most explicit design:
+This is the part we can't hand-wave, so here's the actual plan:
 
-1. **Every transfer is one DB transaction.** All entry inserts for a transfer happen inside a single Postgres transaction; either all rows land or none do.
-2. **DB-level balance invariant, not just app-level checks:**
-   - A `CHECK` constraint / trigger that validates, per `transaction_id`, `SUM(CASE WHEN direction='debit' THEN amount ELSE -amount END) = 0` before commit (Postgres deferred constraint trigger, since the check spans multiple rows inserted together).
-   - A `UNIQUE` constraint on `transactions.idempotency_key` — concurrent retries of the same request race on `INSERT` and the loser gets a unique-violation, which the app maps to "return the original transaction" instead of erroring.
-   - Foreign keys `entries.account_id -> accounts.id`, `entries.transaction_id -> transactions.id`, `NOT NULL`/`CHECK (amount > 0)` on entries.
-3. **Concurrency control for balance-dependent decisions** (e.g. "does this account have sufficient balance for this debit," if/when overdraft rules apply): use `SELECT ... FOR UPDATE` row locks on the source account (or Postgres `SERIALIZABLE` isolation with retry-on-serialization-failure) so two concurrent transfers debiting the same account can't both read a stale balance. Locking order is by `account_id` ascending across both legs to avoid deadlocks when two transfers touch the same pair of accounts in opposite directions.
-4. **No stored mutable balance to go stale**: balance = `SUM(credits) - SUM(debits)` (sign convention per account type) over entries, either computed on read or maintained as a materialized/cached summary that is reconciled against the entry sum in tests — the entries table is always the source of truth.
-5. **Proof, not assertion** — two concrete deliverables:
-   - **Invariant test**: an integration test that spins up N concurrent transfer requests (mixed directions, some deliberately retried with duplicate idempotency keys, some racing on the same accounts) against a real Postgres instance, then asserts: (a) `SUM(all debit entries) == SUM(all credit entries)` globally, (b) each account's derived balance matches an independently-computed expectation, (c) no duplicate transaction was created for a repeated idempotency key, (d) row count of entries is exactly `2 × number of unique transfers accepted`.
-   - **Reconciliation endpoint/script** (`GET /internal/reconcile` or a CLI script) that recomputes global debit/credit sums directly from the `entries` table and returns pass/fail — the "show your work" artifact for finance/reviewers, runnable at any time against a live DB.
+1. **Every transfer is one DB transaction.** All the entry inserts for a transfer happen inside a single Postgres transaction — either every row lands or none of them do.
 
-## Tech Plan
+2. **The balance invariant lives in the database, not just in application code.**
+   - A deferred constraint trigger that checks, per `transaction_id`, that `SUM(CASE WHEN direction='debit' THEN amount ELSE -amount END) = 0` before commit. Has to be a trigger rather than a plain `CHECK` because the constraint spans multiple rows inserted together.
+   - A `UNIQUE` constraint on `transactions.idempotency_key`. Two concurrent retries of the same request will race on insert; whichever one loses gets a unique-violation, and the app maps that to "just return the original transaction" instead of surfacing an error.
+   - Foreign keys tying `entries.account_id` to `accounts.id` and `entries.transaction_id` to `transactions.id`, plus `NOT NULL` and `CHECK (amount > 0)` on entries.
 
-- **Language/runtime**: TypeScript on Node.js.
-- **Framework**: Express (or Fastify) for the HTTP layer — thin, since the API surface is small.
-- **DB**: PostgreSQL, accessed via a query builder/ORM with good raw-SQL escape hatches for the constraint triggers and locking (Knex or Prisma — Knex is a better fit here since we need custom triggers/`FOR UPDATE` control that Prisma makes awkward).
-- **Migrations**: SQL migration files (Knex migrations) defining accounts/transactions/entries tables, constraints, indexes (`entries(account_id, created_at)` for statements, unique index on `transactions.idempotency_key`).
-- **Testing**: Jest (or Vitest) for unit tests on validation/business logic; integration tests running against a real Postgres (via Docker) for the transactional/concurrency guarantees — these must not be mocked, since the whole point is to prove DB-enforced correctness.
-- **Local run**: `docker-compose.yml` with a `postgres` service and an `app` service; `npm run dev` / `docker-compose up` brings up the full stack; a seed/migration step on startup.
-- **Repo layout** (indicative):
-  - `src/db/migrations/` — schema + constraints
+3. **Locking for balance-dependent decisions.** If/when overdraft rules come into play and we need to know "does this account actually have enough for this debit," we'll use `SELECT ... FOR UPDATE` on the source account (or `SERIALIZABLE` isolation with retry on serialization failure) so two concurrent transfers debiting the same account can't both work off a stale read. We lock in ascending `account_id` order across both legs so two transfers touching the same pair of accounts in opposite directions can't deadlock each other.
+
+4. **No mutable balance column to go stale.** Balance is always `SUM(credits) - SUM(debits)` over entries (sign flips depending on account type) — computed on read, or cached and reconciled against the entry sum in tests. The entries table is the only thing that's ever authoritative.
+
+5. **Two things that actually prove this works, not just claim it:**
+   - An integration test that fires N concurrent transfer requests at a real Postgres instance — mixed directions, some deliberately retried with duplicate idempotency keys, some racing on the same accounts — and then checks: total debits equal total credits globally, each account's derived balance matches what we independently expect, no duplicate transaction got created from a repeated key, and the entries row count is exactly 2× the number of unique transfers that actually got accepted.
+   - A reconciliation endpoint (or a CLI script — `GET /internal/reconcile`) that recomputes the global debit/credit sums straight from the `entries` table and reports pass or fail. This is the artifact finance or a reviewer can run themselves, any time, against a live DB.
+
+## Tech plan
+
+- **Language/runtime:** TypeScript on Node.js
+- **Framework:** Express (or Fastify) — the API surface is small, so keep the framework thin
+- **DB:** Postgres, via a query builder with a good raw-SQL escape hatch, since we need custom triggers and explicit `FOR UPDATE` control. Knex fits better here than Prisma for exactly that reason.
+- **Migrations:** SQL migration files (Knex) for the accounts/transactions/entries tables, the constraints, and indexes — `entries(account_id, created_at)` for statements, a unique index on `transactions.idempotency_key`.
+- **Testing:** Jest or Vitest for unit tests on validation and business logic. Integration tests run against a real Postgres in Docker for anything transactional or concurrency-related — those can't be mocked, since the entire point is proving the DB actually enforces correctness.
+- **Local run:** `docker-compose.yml` with a `postgres` service and an `app` service. `docker-compose up` (or `npm run dev`) brings the whole stack up, migrations run on startup.
+- **Repo layout:**
+  - `src/db/migrations/` — schema and constraints
   - `src/domain/` — Account, Transaction, Entry types and invariant logic
   - `src/services/` — `transferService`, `accountService`, `statementService`
-  - `src/api/` — route handlers, request validation (e.g. zod)
+  - `src/api/` — route handlers, request validation (zod)
   - `src/db/` — connection pool, transaction helpers (lock ordering, retry-on-serialization-failure)
   - `test/integration/concurrency.test.ts` — the invariant-proof test
   - `test/integration/idempotency.test.ts`
-  - `test/unit/` — domain + validation tests
+  - `test/unit/` — domain and validation tests
 
-## Out of Scope (for this iteration)
+## How we'll verify it's actually done
 
-- Multi-currency FX conversion (transfers require matching currencies).
-- AuthN/AuthZ, rate limiting, multi-tenant isolation.
-- Horizontal multi-instance scaling concerns beyond what Postgres locking already guarantees (single app instance assumed; DB-level guarantees make this safe to scale later without redesign).
-- Reversal/refund as a distinct first-class operation — modeled as just another transfer in the opposite direction, which the existing primitive already supports; a `related_transaction_id` metadata field can link them if needed, but no special endpoint.
-- CI pipeline, observability/metrics, structured logging beyond basics.
-
-## Verification Plan
-
-1. `docker-compose up` — Postgres + app start, migrations run automatically.
-2. Manual smoke test via curl/HTTP file: create two accounts, transfer funds, fetch balance and statement, confirm running balance math.
-3. Retry the same transfer with the same `idempotency_key` — confirm no duplicate entries, same response returned.
-4. Attempt a cross-currency or negative-amount transfer — confirm clean 4xx rejection.
-5. Run `npm test` — unit tests pass.
-6. Run the integration/concurrency test suite against the Dockerized Postgres — confirm it fires concurrent transfers and asserts sum(debits) == sum(credits) with zero duplicates, and that the test would *fail* if the DB constraint/locking were removed (sanity-check the test isn't vacuous, e.g. temporarily by reviewing it induces real contention).
-7. Run the reconciliation script/endpoint against the post-test DB state and confirm it reports balanced.
+1. `docker-compose up` — Postgres and the app come up, migrations run automatically.
+2. Manual smoke test with curl or an HTTP file: create two accounts, transfer funds, pull the balance and the statement, check the running balance math by hand.
+3. Retry the same transfer with the same idempotency key — confirm there's no duplicate entry and the same response comes back.
+4. Try a cross-currency transfer, and a negative-amount one — confirm both get a clean 4xx.
+5. `npm test` — unit tests pass.
+6. Run the integration/concurrency suite against the Dockerized Postgres — confirm it fires concurrent transfers, asserts debits equal credits with zero duplicates, and (as a sanity check that the test isn't vacuous) that it would actually fail if we pulled out the DB constraint or the locking.
+7. Run the reconciliation script/endpoint against the post-test DB state and confirm it comes back balanced.

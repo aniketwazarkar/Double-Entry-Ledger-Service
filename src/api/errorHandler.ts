@@ -21,8 +21,6 @@ export function asyncHandler(
  *   NotFoundError                     -> 404 NotFoundError
  *   anything else                     -> 500 InternalError, logged, never leaked
  *
- * Must be mounted last, after all routers, so Express treats it as the error
- * handler (a 4-arg middleware).
  */
 export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   if (err instanceof ZodError) {
