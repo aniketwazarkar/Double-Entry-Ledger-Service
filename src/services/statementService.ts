@@ -23,30 +23,6 @@ export interface GetStatementOptions {
 export const DEFAULT_LIMIT = 50;
 export const MAX_LIMIT = 500;
 
-/**
- * The cursor's timestamp is carried as the *text* PostgreSQL printed for
- * `created_at`, never as a JS `Date`.
- *
- * This is the crux of the whole design. `created_at` is a timestamptz with
- * microsecond resolution; a JS `Date` has only milliseconds. If the cursor were
- * built from `row.created_at` (which node-postgres has already truncated to a
- * Date), then for an entry stored at `…:00.000_400` the cursor would say
- * `…:00.000_000`, and a keyset predicate of `(created_at, id) > (cursor_ts,
- * cursor_id)` would compare against a timestamp *earlier* than the row it was
- * supposed to resume after. Every other entry in that same millisecond with a
- * larger id — including the cursor row itself — would then compare greater and
- * be returned a second time, so a page boundary landing inside a busy
- * millisecond would replay rows forever instead of advancing. Widening the
- * comparison the way `getBalance`'s `asOf` does is not an option here either:
- * that would skip the tail of the millisecond instead.
- *
- * Round-tripping the microsecond-precision text through `?::timestamptz` is
- * exact, so the keyset comparison is done on the true stored value and the
- * boundary is neither lossy nor ambiguous. `created_at` alone is not enough to
- * identify a position (many entries can share one microsecond — a transfer's
- * two legs always do), so the id is part of the cursor and part of the
- * comparison.
- */
 interface CursorPosition {
   /** Postgres' own text rendering, e.g. `2026-01-01 00:00:00.000400+00`. */
   createdAt: string;
@@ -61,25 +37,6 @@ function encodeCursor(position: CursorPosition): string {
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/**
- * Both halves are shape-checked here, before they can reach the `?::timestamptz`
- * and `?::uuid` casts in the query.
- *
- * A cursor is caller-supplied input, and "decodes to an array of two non-empty
- * strings" is not enough to make it safe to hand to PostgreSQL: a cursor built
- * from well-formed nonsense (`["banana", "not-a-uuid"]`) would satisfy that and
- * then fail *inside* the SQL, raising a raw pg error (22007 invalid datetime
- * format / 22P02 invalid text representation) that belongs to no domain error
- * class and so surfaces as an opaque 500 for what is simply malformed input.
- * Rejecting it here makes the same case a `ValidationError`, like every other
- * bad argument to this function.
- *
- * `Date.parse` is used strictly as a yes/no format check and its numeric result
- * is deliberately discarded: parsing truncates to milliseconds, and the whole
- * point of the cursor is that the microsecond-precision *text* is what reaches
- * the comparison (see the CursorPosition note above). The raw string is what is
- * returned.
- */
 function decodeCursor(cursor: string): CursorPosition {
   let parsed: unknown;
   try {
@@ -136,41 +93,6 @@ interface StatementQueryRow {
   running_balance: string;
 }
 
-/**
- * A page of an account's history, oldest first, each row carrying the account's
- * balance as of (and including) that row.
- *
- * Keyset (not offset) pagination on `(created_at, id)`: a cursor names a row,
- * not a position in a count, so entries appended while a client is paging cannot
- * shift a page's contents the way an OFFSET would.
- *
- * That guarantee rests on one assumption worth stating: that `created_at` is
- * assigned close to commit time, so the key order and the visibility order
- * broadly agree. It is not strictly true. `entries.created_at` defaults to
- * `now()`, which in PostgreSQL is *transaction start* time, so a transaction
- * that begins early and commits late writes a row whose `created_at` is older
- * than rows already committed and already paged past. A client holding a cursor
- * beyond that timestamp would never see it — the row is skipped permanently, not
- * merely reordered. In practice a transfer's window between `now()` and COMMIT is
- * sub-millisecond, so this needs a pathologically slow concurrent writer, but the
- * hazard is real and inherent to keying on `created_at` rather than on something
- * monotonic in commit order. Closing it properly is a schema change (a sequence
- * column ordered by commit, or `clock_timestamp()` plus a read-snapshot upper
- * bound), not something this function can do on its own.
- *
- * Everything is computed in one statement, and therefore against one snapshot.
- * That matters for the running balance, which is the sum of two pieces: the
- * balance accumulated strictly at-or-before the cursor row (`base`) and the
- * cumulative sum within the page. Computed as two round trips, a write
- * committing in between could be counted in one piece and not the other,
- * producing a running balance that never existed. As one statement, the two
- * pieces always agree.
- *
- * `base` deliberately re-sums the account's history from the beginning on every
- * page, rather than trusting a balance carried in the cursor. A client-supplied
- * running total would be a number the service cannot verify, and it is exactly
- * what `runningBalance` is supposed to be an authoritative statement about.
- */
 export async function getStatement(
   accountId: string,
   options: GetStatementOptions = {},

@@ -1,14 +1,5 @@
 import { z } from 'zod';
 
-/**
- * Every request-body field here is validated at the API boundary, before any
- * service function or DB call runs. This is deliberately stricter/different
- * from the service-layer checks (e.g. transferService.transfer's own
- * ValidationErrors on amount/ids) — the boundary check exists so a malformed
- * request produces a zod-shaped 400 with a `details` array, per the PRD Error
- * Contract, rather than reaching a service and failing on a differently
- * shaped error (or, for a non-UUID id, a raw Postgres error).
- */
 const uuidSchema = z.string().uuid();
 
 /** Integer minor-unit amount, strictly positive. Floats are rejected here. */

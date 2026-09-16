@@ -1,36 +1,5 @@
 import type { Knex } from 'knex';
 
-/**
- * The balance invariant: for every transaction, SUM(debits) - SUM(credits) = 0.
- *
- * This is enforced by the database itself, not by application code, so it holds
- * under any concurrency and for any writer (including psql).
- *
- * Why a DEFERRABLE INITIALLY DEFERRED constraint trigger:
- * a transfer inserts its debit and its credit as sibling rows. At the moment the
- * first row hits the table the transaction is legitimately unbalanced, so the
- * check cannot run at statement time — it must run at COMMIT, once every row of
- * the transaction is in place. Deferral is what makes that possible.
- *
- * Why FOR EACH ROW: PostgreSQL's CREATE CONSTRAINT TRIGGER grammar supports only
- * FOR EACH ROW, and accepts no REFERENCING ... NEW TABLE clause (verified against
- * postgres:16 — both spellings are syntax errors). The usual objection to a
- * row-level trigger is that it cannot see the sibling rows of its own multi-row
- * INSERT; that objection does not apply here, because deferral moves execution to
- * COMMIT time and the function re-queries `entries` rather than reading NEW. By
- * then every sibling row is visible, so each firing evaluates the same, complete,
- * final state of the transaction.
- *
- * The trigger covers UPDATE and DELETE as well as INSERT, so the invariant cannot
- * be broken after the fact by editing or removing a single leg.
- *
- * CAUTION for application code: never issue `SET CONSTRAINTS ALL IMMEDIATE` in a
- * session that performs multi-leg inserts. That undeferrs this trigger, forcing it
- * to fire per row during the statement, at which point a perfectly legitimate
- * balanced transfer is rejected on its first leg because the counterpart row does
- * not exist yet. This fails closed (it cannot admit bad data, only refuse good
- * data), but it is baffling to debug if you do not know to look for it.
- */
 export async function up(knex: Knex): Promise<void> {
   // Two guards against temp-table shadowing, both deliberate:
   //

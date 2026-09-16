@@ -7,7 +7,6 @@ export interface TransferInput {
   idempotencyKey: string;
   fromAccountId: string;
   toAccountId: string;
-  /** Integer amount in minor units, strictly positive. */
   amount: number;
   currency: string;
   description?: string | null;
@@ -35,7 +34,6 @@ interface EntryRow {
   transaction_id: string;
   account_id: string;
   direction: Direction;
-  /** `bigint` — node-postgres hands these back as strings. */
   amount: string | number;
   currency: string;
   created_at: Date;

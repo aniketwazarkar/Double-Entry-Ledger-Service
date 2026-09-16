@@ -12,8 +12,16 @@
     "reconcile": "ts-node scripts/reconcile.ts",
     "seed": "ts-node scripts/seed-dev-data.ts",
     "test": "jest",
-    "test:unit": "jest --testPathPattern=test/unit",
-    "test:integration": "jest --testPathPattern=test/integration"
+    "test:integration": "jest --testPathPattern=test/integration",
+    "test:accounts": "jest --testPathPattern=test/integration/accounts.test.ts",
+    "test:api": "jest --testPathPattern=test/integration/api.test.ts",
+    "test:balance-invariant": "jest --testPathPattern=test/integration/balance-invariant.test.ts",
+    "test:balance": "jest --testPathPattern=test/integration/balance.test.ts",
+    "test:concurrency": "jest --testPathPattern=test/integration/concurrency.test.ts",
+    "test:db-connection": "jest --testPathPattern=test/integration/db-connection.test.ts",
+    "test:reconciliation": "jest --testPathPattern=test/integration/reconciliation.test.ts",
+    "test:statement": "jest --testPathPattern=test/integration/statement.test.ts",
+    "test:transfers": "jest --testPathPattern=test/integration/transfers.test.ts"
   },
   "license": "UNLICENSED",
   "dependencies": {

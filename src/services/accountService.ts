@@ -103,14 +103,6 @@ export async function getBalance(id: string, asOf?: Date): Promise<number> {
 
   const query = db('entries').where({ account_id: id });
   if (asOf) {
-    // `created_at` is a Postgres timestamptz with microsecond precision, but a
-    // JS Date only carries milliseconds, so `asOf` is always a truncated-down
-    // representation of any real timestamp that shares its millisecond. Using
-    // a plain `<=` would then exclude a row created in the same millisecond as
-    // `asOf` whenever its microsecond remainder is non-zero (e.g. an entry's
-    // own `createdAt`, echoed straight back as `asOf`, would fail to match
-    // itself). Comparing against the start of the *next* millisecond makes the
-    // whole millisecond of `asOf` inclusive, which is the intended boundary.
     query.where('created_at', '<', new Date(asOf.getTime() + 1));
   }
 

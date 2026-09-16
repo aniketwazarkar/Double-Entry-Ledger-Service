@@ -5,6 +5,7 @@ import { transferBodySchema } from '../validation';
 
 export const transfersRouter = Router();
 
+// Endpoint to initiate a transfer between two accounts
 transfersRouter.post(
   '/',
   asyncHandler(async (req, res) => {

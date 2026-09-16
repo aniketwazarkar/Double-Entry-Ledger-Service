@@ -5,6 +5,7 @@ import { transactionIdParamsSchema } from '../validation';
 
 export const transactionsRouter = Router();
 
+// Get a specific transaction by ID, including its associated entries
 transactionsRouter.get(
   '/:id',
   asyncHandler(async (req, res) => {

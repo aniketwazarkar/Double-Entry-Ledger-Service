@@ -6,6 +6,7 @@ import { accountIdParamsSchema, balanceQuerySchema, createAccountSchema, stateme
 
 export const accountsRouter = Router();
 
+// Create a new account
 accountsRouter.post(
   '/',
   asyncHandler(async (req, res) => {
@@ -24,6 +25,7 @@ accountsRouter.get(
   })
 );
 
+// Get a specific account by ID
 accountsRouter.get(
   '/:id',
   asyncHandler(async (req, res) => {
@@ -33,6 +35,7 @@ accountsRouter.get(
   })
 );
 
+// Get the balance of a specific account by ID, optionally as of a specific date
 accountsRouter.get(
   '/:id/balance',
   asyncHandler(async (req, res) => {
@@ -43,6 +46,7 @@ accountsRouter.get(
   })
 );
 
+// Get the statement of a specific account by ID, with optional pagination parameters
 accountsRouter.get(
   '/:id/statement',
   asyncHandler(async (req, res) => {

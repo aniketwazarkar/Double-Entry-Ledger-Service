@@ -1,5 +1,4 @@
-/* eslint-disable no-console */
-// Not part of the plan/PRD — a one-off script for populating local Postgres
+// Not part of the plan/PRD it's a one-off script for populating local Postgres
 // with example data to inspect in pgAdmin. Not committed to the repo.
 import * as accountService from '../src/services/accountService';
 import * as transferService from '../src/services/transferService';

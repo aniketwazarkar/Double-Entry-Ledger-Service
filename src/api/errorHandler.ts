@@ -2,10 +2,6 @@ import { ErrorRequestHandler, NextFunction, Request, Response } from 'express';
 import { ZodError } from 'zod';
 import { CurrencyMismatchError, NotFoundError, ValidationError } from '../domain/errors';
 
-/**
- * Wraps an async route handler so a rejected promise reaches Express's error
- * pipeline (this codebase's Express 4 has no built-in async error handling).
- */
 export function asyncHandler(
   fn: (req: Request, res: Response, next: NextFunction) => Promise<void>
 ) {
@@ -20,7 +16,6 @@ export function asyncHandler(
  *   CurrencyMismatchError             -> 400 CurrencyMismatchError
  *   NotFoundError                     -> 404 NotFoundError
  *   anything else                     -> 500 InternalError, logged, never leaked
- *
  */
 export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   if (err instanceof ZodError) {
@@ -60,8 +55,6 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     return;
   }
 
-  // Unexpected error: log server-side only, never leak internals to the client.
-  // eslint-disable-next-line no-console
   console.error('Unhandled error in request pipeline:', err);
   res.status(500).json({
     error: 'InternalError',

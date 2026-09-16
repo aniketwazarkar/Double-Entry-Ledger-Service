@@ -232,19 +232,12 @@ describe('statementService.getStatement', () => {
     expect(second.rows).toHaveLength(1);
     expect(second.nextCursor).toBeNull();
 
-    // Exactly-full final page: a limit equal to the remaining count must still
-    // report null rather than handing back a cursor to an empty page.
     const exact = await statementService.getStatement(a.id, { limit: 3 });
     expect(exact.rows).toHaveLength(3);
     expect(exact.nextCursor).toBeNull();
   });
 
   it('does not skip or duplicate rows whose timestamps differ only below millisecond precision', async () => {
-    // Six entries in a single millisecond (.000), separated only by
-    // microseconds. A cursor that round-tripped created_at through a JS Date
-    // would truncate all six to the same value, and a keyset comparison on the
-    // truncated value would either skip the rest of the millisecond or replay
-    // it forever.
     const base = '2026-01-01 00:00:00.000';
     const micros = ['100', '200', '300', '400', '500', '600'];
     for (const [i, us] of micros.entries()) {
@@ -260,15 +253,11 @@ describe('statementService.getStatement', () => {
     expect(rows.map((r) => r.entry.amount)).toEqual([10, 20, 30, 40, 50, 60]);
     expect(rows.map((r) => r.runningBalance)).toEqual(expected);
 
-    // Every row shares the same millisecond, so this is only meaningful if the
-    // fixture really did collapse to one millisecond in JS.
     const millis = new Set(rows.map((r) => r.entry.createdAt.getTime()));
     expect(millis.size).toBe(1);
   });
 
   it('orders deterministically by id when created_at is exactly equal', async () => {
-    // Three entries at the identical microsecond: only the id tiebreak can
-    // order them, and only an id in the cursor can resume from the middle.
     const ts = '2026-02-02 00:00:00.500000+00';
     for (let i = 0; i < 3; i += 1) {
       await insertPairAt(a.id, b.id, (i + 1) * 100, ts);
@@ -312,9 +301,7 @@ describe('statementService.getStatement', () => {
       limit: 2,
       cursor: first.nextCursor!,
     });
-
-    // The rows already returned are not repeated, and the running balance picks
-    // up exactly where page one left off — no offset-style shifting.
+    
     expect(second.rows.map((r) => r.entry.id)).not.toEqual(
       expect.arrayContaining(first.rows.map((r) => r.entry.id)),
     );
@@ -330,11 +317,6 @@ describe('statementService.getStatement', () => {
   });
 
   it('rejects a structurally valid cursor carrying nonsense values', async () => {
-    // Decodes cleanly to an array of two non-empty strings, so it gets past the
-    // JSON/shape check that 'not-a-cursor' fails at. Without explicit format
-    // validation these reach the ?::timestamptz / ?::uuid casts in the query and
-    // PostgreSQL raises a raw 22007 / 22P02 that maps to no domain error — an
-    // opaque 500 for what is merely malformed input.
     const nonsense = (createdAt: string, id: string): string =>
       Buffer.from(JSON.stringify([createdAt, id]), 'utf8').toString('base64url');
 

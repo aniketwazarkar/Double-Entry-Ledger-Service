@@ -15,7 +15,4 @@ app.use('/accounts', accountsRouter);
 app.use('/transfers', transfersRouter);
 app.use('/transactions', transactionsRouter);
 app.use('/internal', internalRouter);
-
-// Must be mounted last: Express identifies an error-handling middleware by its
-// four-argument signature and only reaches it after all other routes/middleware.
 app.use(errorHandler);
